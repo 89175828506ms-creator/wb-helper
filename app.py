@@ -18,6 +18,7 @@ def process_wb_shop(account):
     }
     shop_name = account["name"]
 
+    # 1. Получаем новые сборочные задания
     url_new = "https://marketplace-api.wildberries.ru/api/v3/orders/new"
     try:
         res = requests.get(url_new, headers=headers, timeout=15)
@@ -37,6 +38,7 @@ def process_wb_shop(account):
         summary[art] += 1
         order_ids.append(o["id"])
 
+    # 2. Создаем новую поставку
     now_str = datetime.datetime.now().strftime("%d.%m_%H:%M")
     supply_name = f"Сборка_{now_str}"
     create_url = "https://marketplace-api.wildberries.ru/api/v3/supplies"
@@ -46,25 +48,35 @@ def process_wb_shop(account):
     if not supply_id:
         return {"shop": shop_name, "error": f"Не удалось создать поставку: {s_res}"}
 
+    # 3. Добавляем заказы в поставку (пробуем PATCH, если нет — PUT)
+    errors = []
+    added = 0
     for oid in order_ids:
         add_url = f"https://marketplace-api.wildberries.ru/api/v3/supplies/{supply_id}/orders/{oid}"
-        requests.patch(add_url, headers=headers)
+        r = requests.patch(add_url, headers=headers)
+        if r.status_code not in [200, 204]:
+            r = requests.put(add_url, headers=headers)
+        
+        if r.status_code in [200, 204]:
+            added += 1
+        else:
+            errors.append(f"Заказ {oid}: статус {r.status_code} ({r.text})")
 
-    deliver_url = f"https://marketplace-api.wildberries.ru/api/v3/supplies/{supply_id}/deliver"
-    deliver_res = requests.patch(deliver_url, headers=headers)
-    deliver_status = "Поставка переведена в доставку" if deliver_res.status_code in [200, 204] else f"Статус: {deliver_res.status_code}"
+    status_msg = f"Привязано {added} из {len(order_ids)} заказов"
+    if errors:
+        status_msg += f" | Ошибки: {'; '.join(errors[:2])}"
 
     return {
         "shop": shop_name,
         "supply_id": supply_id,
-        "supply_status": deliver_status,
+        "supply_status": status_msg,
         "orders_count": len(orders),
         "total_items": len(orders),
         "items": dict(summary)
     }
 
 if st.button("🚀 Собрать заказы (оба кабинета)", type="primary", use_container_width=True):
-    with st.spinner("Опрашиваем кабинеты и формируем поставки..."):
+    with st.spinner("Сборка и добавление в поставку..."):
         results = []
         for acc in config.WB_ACCOUNTS:
             res = process_wb_shop(acc)
@@ -84,7 +96,7 @@ if "wb_results" in st.session_state:
 
         st.write(f"Заказов: **{res['orders_count']} шт.**")
         if res.get("supply_id"):
-            st.caption(f"ID поставки: `{res['supply_id']}` ({res.get('supply_status')})")
+            st.caption(f"Поставка: `{res['supply_id']}` ➔ {res.get('supply_status')}")
 
         if res["items"]:
             df = pd.DataFrame(
