@@ -17,33 +17,35 @@ from reportlab.pdfbase.ttfonts import TTFont
 
 import config
 
-st.set_page_config(page_title="Сборка Ozon", page_icon="📦", layout="centered")
+st.set_page_config(page_title="Сборка WB + Ozon", page_icon="📦", layout="centered")
 
-st.title("📦 Сборка Ozon FBS")
-st.caption("Автоупаковка, деление мест 2+ шт, нанесение артикула на наклейку и отправка на почту")
+st.title("📦 Сборка заказов (2 WB + 1 Ozon)")
+st.caption("Автоупаковка, деление мест Ozon, артикулы на наклейках и отправка на почту")
 
-# Регистрация шрифта с поддержкой кириллицы
+# ----------------- ЗАГРУЗКА И РЕГИСТРАЦИЯ РУССКОГО ШРИФТА -----------------
 FONT_NAME = "Helvetica"
-possible_fonts = [
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-    "C:\\Windows\\Fonts\\arialbd.ttf",
-    "C:\\Windows\\Fonts\\arial.ttf",
-    "/Library/Fonts/Arial Bold.ttf",
-    "/Library/Fonts/Arial.ttf"
-]
-for f_path in possible_fonts:
-    if os.path.exists(f_path):
-        try:
-            pdfmetrics.registerFont(TTFont("CustomBold", f_path))
-            FONT_NAME = "CustomBold"
-            break
-        except Exception:
-            pass
+FONT_PATH = "DejaVuSans-Bold.ttf"
+
+if not os.path.exists(FONT_PATH):
+    try:
+        font_url = "https://raw.githubusercontent.com/dejavu-fonts/dejavu-fonts/master/resources/DejaVuSans-Bold.ttf"
+        r = requests.get(font_url, timeout=15)
+        if r.status_code == 200:
+            with open(FONT_PATH, "wb") as f:
+                f.write(r.content)
+    except Exception:
+        pass
+
+if os.path.exists(FONT_PATH):
+    try:
+        pdfmetrics.registerFont(TTFont("DejaVuBold", FONT_PATH))
+        FONT_NAME = "DejaVuBold"
+    except Exception:
+        pass
+
 
 def add_article_to_pdf(original_pdf_bytes, article_text):
-    """Накладывает нижнюю плашку с артикулом на каждую страницу PDF-наклейки."""
+    """Накладывает плашку с артикулом в свободную верхнюю часть этикетки, не перекрывая QR-код."""
     try:
         reader = PdfReader(io.BytesIO(original_pdf_bytes))
         writer = PdfWriter()
@@ -52,32 +54,31 @@ def add_article_to_pdf(original_pdf_bytes, article_text):
             w = float(page.mediabox.width)
             h = float(page.mediabox.height)
 
-            # Создаем накладываемый слой
             packet = io.BytesIO()
             can = canvas.Canvas(packet, pagesize=(w, h))
 
-            # Высота нижней плашки
-            bar_height = max(24.0, h * 0.08)
+            bar_height = 26.0
+            # Размещаем плашку в верхнем свободном поле (h - bar_height - 6)
+            y_pos = h - bar_height - 6.0
 
-            # Белый прямоугольник с черной рамкой
+            # Белый прямоугольник с тонкой черной рамкой
             can.setFillColorRGB(1, 1, 1)
             can.setStrokeColorRGB(0, 0, 0)
             can.setLineWidth(1)
-            can.rect(2, 2, w - 4, bar_height, fill=1, stroke=1)
+            can.rect(6, y_pos, w - 12, bar_height, fill=1, stroke=1)
 
-            # Текст артикула
+            # Надпись артикула черным цветом
             can.setFillColorRGB(0, 0, 0)
-            font_size = min(14.0, bar_height * 0.5)
-            can.setFont(FONT_NAME, font_size)
-
+            font_size = 12.0
             display_text = f"АРТИКУЛ: {article_text}"
-            # Если текст слишком длинный, немного уменьшаем размер
-            text_width = can.stringWidth(display_text, FONT_NAME, font_size)
-            if text_width > (w - 10):
-                font_size = font_size * ((w - 10) / text_width)
-                can.setFont(FONT_NAME, font_size)
 
-            can.drawCentredString(w / 2.0, (bar_height - font_size) / 2.0 + 3, display_text)
+            # Подгоняем размер шрифта, если артикул длинный
+            text_width = can.stringWidth(display_text, FONT_NAME, font_size)
+            if text_width > (w - 20):
+                font_size = font_size * ((w - 20) / text_width)
+
+            can.setFont(FONT_NAME, font_size)
+            can.drawCentredString(w / 2.0, y_pos + (bar_height - font_size) / 2.0 + 2, display_text)
             can.save()
 
             packet.seek(0)
@@ -89,9 +90,72 @@ def add_article_to_pdf(original_pdf_bytes, article_text):
         writer.write(out_io)
         return out_io.getvalue()
     except Exception as e:
-        st.warning(f"Не удалось напечатать артикул на наклейке: {e}")
+        st.warning(f"Предупреждение по наклейке: {e}")
         return original_pdf_bytes
 
+
+# ----------------- WILDBERRIES -----------------
+def process_wb(account):
+    headers = {
+        "Authorization": account["token"].strip(),
+        "Content-Type": "application/json"
+    }
+    shop_name = account["name"]
+
+    url_new = "https://marketplace-api.wildberries.ru/api/v3/orders/new"
+    try:
+        res = requests.get(url_new, headers=headers, timeout=15)
+        if res.status_code != 200:
+            return {"shop": shop_name, "error": f"Ошибка WB: {res.status_code}", "pdf": None}
+        orders = res.json().get("orders", [])
+    except Exception as e:
+        return {"shop": shop_name, "error": f"Сетевая ошибка WB: {e}", "pdf": None}
+
+    if not orders:
+        return {"shop": shop_name, "orders_count": 0, "pdf": None}
+
+    order_ids = [o["id"] for o in orders]
+
+    now_str = datetime.datetime.now().strftime("%d.%m_%H:%M")
+    s_res = requests.post(
+        "https://marketplace-api.wildberries.ru/api/v3/supplies",
+        json={"name": f"Сборка_{now_str}"},
+        headers=headers
+    ).json()
+    supply_id = s_res.get("id")
+
+    if supply_id:
+        requests.patch(
+            f"https://marketplace-api.wildberries.ru/api/marketplace/v3/supplies/{supply_id}/orders",
+            json={"orders": order_ids},
+            headers=headers
+        )
+        time.sleep(2)
+        requests.patch(f"https://marketplace-api.wildberries.ru/api/v3/supplies/{supply_id}/deliver", headers=headers)
+
+    pdf_bytes = None
+    try:
+        st_res = requests.post(
+            "https://marketplace-api.wildberries.ru/api/v3/orders/stickers?type=pdf&width=58&height=40",
+            json={"orders": order_ids},
+            headers=headers
+        )
+        if st_res.status_code == 200:
+            file_b64 = st_res.json().get("data", {}).get("file")
+            if file_b64:
+                import base64
+                pdf_bytes = base64.b64decode(file_b64)
+    except Exception:
+        pass
+
+    return {
+        "shop": shop_name,
+        "orders_count": len(orders),
+        "pdf": pdf_bytes
+    }
+
+
+# ----------------- OZON -----------------
 def process_ozon(account):
     headers = {
         "Client-Id": str(account["client_id"]).strip(),
@@ -127,7 +191,7 @@ def process_ozon(account):
     if not postings:
         return {"shop": shop_name, "orders_count": 0, "pdf": None}
 
-    packaged_groups = []  # [( [posting_numbers], article )]
+    packaged_groups = []
     errors = []
 
     for p in postings:
@@ -141,7 +205,6 @@ def process_ozon(account):
             sku = prod.get("sku")
             arts.append(art)
 
-            # 1 единица = 1 отдельное место
             for _ in range(qty):
                 packages.append({
                     "products": [{
@@ -167,7 +230,6 @@ def process_ozon(account):
 
     time.sleep(2)
 
-    # Скачивание наклеек и наложение артикула
     merged_writer = PdfWriter()
     total_labels = 0
 
@@ -203,60 +265,70 @@ def process_ozon(account):
         res_dict["error"] = " | ".join(errors)
     return res_dict
 
-def send_email(subject, filename, content):
+
+# ----------------- ОТПРАВКА НА ПОЧТУ -----------------
+def send_email(subject, attachments):
     cfg = config.EMAIL_SETTINGS
     msg = MIMEMultipart()
     msg["From"] = cfg["sender_email"]
     msg["To"] = cfg["receiver_email"]
     msg["Subject"] = subject
 
-    body = "<p>Во вложении этикетки Ozon с артикулами товаров для печати на термопринтере.</p>"
+    body = "<p>Во вложении файлы этикеток для сборки заказов (WB и Ozon).</p>"
     msg.attach(MIMEText(body, "html", "utf-8"))
 
-    part = MIMEApplication(content, Name=filename)
-    part["Content-Disposition"] = f'attachment; filename="{filename}"'
-    msg.attach(part)
+    for filename, content in attachments:
+        part = MIMEApplication(content, Name=filename)
+        part["Content-Disposition"] = f'attachment; filename="{filename}"'
+        msg.attach(part)
 
     with smtplib.SMTP_SSL(cfg["smtp_server"], cfg["smtp_port"]) as server:
         server.login(cfg["sender_email"], cfg["app_password"])
         server.sendmail(cfg["sender_email"], cfg["receiver_email"], msg.as_string())
 
-# Кнопка запуска
-if st.button("🚀 Собрать Ozon и получить наклейки с артикулами", type="primary", use_container_width=True):
-    with st.spinner("Собираем отправления, делим коробки, подписываем артикулы..."):
-        all_results = []
-        pdf_to_send = None
 
+# ----------------- ИНТЕРФЕЙС -----------------
+if st.button("🚀 Собрать все заказы (WB + Ozon)", type="primary", use_container_width=True):
+    with st.spinner("Сборка заказов, деление мест Ozon и подготовка наклеек..."):
+        all_results = []
+        attachments = []
+
+        # 1. Сборка Wildberries
+        for acc in getattr(config, "WB_ACCOUNTS", []):
+            res = process_wb(acc)
+            all_results.append(res)
+            if res.get("pdf"):
+                clean_name = res["shop"].replace(" ", "_")
+                attachments.append((f"Наклейки_{clean_name}.pdf", res["pdf"]))
+
+        # 2. Сборка Ozon (с артикулами на наклейках)
         for acc in getattr(config, "OZON_ACCOUNTS", []):
             res = process_ozon(acc)
             all_results.append(res)
             if res.get("pdf"):
-                pdf_to_send = res["pdf"]
+                clean_name = res["shop"].replace(" ", "_")
+                attachments.append((f"Наклейки_{clean_name}_с_артикулами.pdf", res["pdf"]))
 
         st.session_state["results"] = all_results
 
-        if pdf_to_send and hasattr(config, "EMAIL_SETTINGS"):
-            now_str = datetime.datetime.now().strftime("%d.%m_%H_%M")
+        # 3. Отправка одним письмом на почту
+        if attachments and hasattr(config, "EMAIL_SETTINGS"):
+            now_str = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
             try:
-                send_email(
-                    f"Наклейки Ozon с артикулами ({now_str})",
-                    f"Наклейки_Ozon_{now_str}.pdf",
-                    pdf_to_send
-                )
-                st.success("✉️ Готово! Этикетки с артикулами отправлены на mebel_2026@bk.ru!")
+                send_email(f"Наклейки WB + Ozon на {now_str}", attachments)
+                st.success("✉️ Готово! Все наклейки (WB + Ozon с артикулами) отправлены на mebel_2026@bk.ru!")
             except Exception as e:
-                st.warning(f"Наклейки сформированы, но произошла ошибка почты: {e}")
+                st.warning(f"Заказы собраны, но возникла ошибка почты: {e}")
         else:
             if not any(r.get("error") for r in all_results):
-                st.info("Новых заказов Ozon, ожидающих сборки, нет.")
+                st.info("Новых заказов для сборки нет.")
 
 if "results" in st.session_state:
-    st.subheader("Результат сборки:")
+    st.subheader("Статус сборки:")
     for res in st.session_state["results"]:
         st.markdown(f"**🏬 {res['shop']}**")
         if "error" in res and res["error"]:
             st.error(res["error"])
         else:
-            cnt = res.get('orders_count', 0)
-            lbls = res.get('labels_count', 0)
-            st.write(f"Заказов упаковано: **{cnt} шт.** | Наклеек сформировано: **{lbls} шт.**")
+            cnt = res.get("orders_count", 0)
+            st.write(f"Заказов в работе: **{cnt} шт.**")
