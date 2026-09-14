@@ -20,7 +20,7 @@ st.caption("Автоупаковка, деление мест 2+ шт, накл�
 # ----------------- ФУНКЦИИ WILDBERRIES -----------------
 def process_wb(account):
     headers = {
-        "Authorization": account["token"],
+        "Authorization": account["token"].strip(),
         "Content-Type": "application/json"
     }
     shop_name = account["name"]
@@ -95,10 +95,18 @@ def process_ozon(account):
     }
     shop_name = account["name"]
 
+    now = datetime.datetime.utcnow()
+    since = (now - datetime.timedelta(days=14)).strftime("%Y-%m-%dT00:00:00Z")
+    to = (now + datetime.timedelta(days=14)).strftime("%Y-%m-%dT23:59:59Z")
+
     list_url = "https://api-seller.ozon.ru/v3/posting/fbs/unfulfilled/list"
     payload = {
         "dir": "ASC",
-        "filter": {"status": "awaiting_packaging"},
+        "filter": {
+            "cutoff_from": since,
+            "cutoff_to": to,
+            "status": "awaiting_packaging"
+        },
         "limit": 100,
         "with": {"analytics_data": False, "financial_data": False}
     }
